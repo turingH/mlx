@@ -4848,3 +4848,12 @@ TEST_CASE("roll and tile shape overflow") {
   auto rolled = roll(x, -2147483647 - 1);
   CHECK(array_equal(rolled, x).item<bool>());
 }
+
+TEST_CASE("test gather_mm oob expert index") {
+  auto a = ones({2, 4, 8}, float32);   // 2 batches
+  auto b = ones({3, 8, 6}, float32);   // 3 batches
+  auto lhs = array({5}, uint32);       // out-of-bounds expert index (>= 2)
+  auto rhs = array({1}, uint32);
+  auto r = gather_mm(a, b, lhs, rhs);
+  CHECK_THROWS_AS(eval(r), std::runtime_error);
+}

@@ -994,6 +994,23 @@ void GatherQMM::eval_cpu(const std::vector<array>& inputs, array& out) {
   auto w = ensure_row_contiguous_last_dims(w_pre);
   auto scales = ensure_row_contiguous_last_dims(scales_pre);
 
+  // Check the expert indices are in bounds before using them as batch offsets.
+  {
+    size_t x_batches = x.size() / (x.shape(-2) * x.shape(-1));
+    size_t w_batches = w.size() / (w.shape(-2) * w.shape(-1));
+    const uint32_t* lhs = lhs_indices.data<uint32_t>();
+    const uint32_t* rhs = rhs_indices.data<uint32_t>();
+    for (int i = 0; i < lhs_indices.size(); ++i) {
+      uint32_t xi =
+          lhs[elem_to_loc(i, lhs_indices.shape(), lhs_indices.strides())];
+      uint32_t wi =
+          rhs[elem_to_loc(i, rhs_indices.shape(), rhs_indices.strides())];
+      if (xi >= x_batches || wi >= w_batches) {
+        throw std::runtime_error("[gather_qmm] Expert index out of bounds.");
+      }
+    }
+  }
+
   out.set_data(allocator::malloc(out.nbytes()));
 
   encoder.set_input_array(x);

@@ -432,6 +432,20 @@ void GatherMM::eval_cpu(const std::vector<array>& inputs, array& out) {
 
   const uint32_t* lhs_indices_ptr = lhs_indices.data<uint32_t>();
   const uint32_t* rhs_indices_ptr = rhs_indices.data<uint32_t>();
+
+  // Check the expert indices are in bounds before using them as batch offsets.
+  size_t a_batches = a.size() / (M * K);
+  size_t b_batches = b.size() / (b.shape(-2) * b.shape(-1));
+  for (int i = 0; i < static_cast<int>(batch_size_out); i++) {
+    uint32_t indx_A = lhs_indices_ptr[elem_to_loc(
+        i, lhs_indices.shape(), lhs_indices.strides())];
+    uint32_t indx_B = rhs_indices_ptr[elem_to_loc(
+        i, rhs_indices.shape(), rhs_indices.strides())];
+    if (indx_A >= a_batches || indx_B >= b_batches) {
+      throw std::runtime_error("[gather_mm] Expert index out of bounds.");
+    }
+  }
+
   encoder.set_input_array(a);
   encoder.set_input_array(b);
   encoder.set_input_array(lhs_indices);
