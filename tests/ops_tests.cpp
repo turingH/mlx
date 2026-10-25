@@ -4848,3 +4848,24 @@ TEST_CASE("roll and tile shape overflow") {
   auto rolled = roll(x, -2147483647 - 1);
   CHECK(array_equal(rolled, x).item<bool>());
 }
+
+TEST_CASE("test slice_update oob start") {
+  auto a = arange(10, float32);
+  auto upd = array({100.0f}, float32);
+  {
+    auto r = slice_update(a, upd, array({20}, int32), {0});
+    CHECK_THROWS_AS(eval(r), std::runtime_error);
+  }
+  {
+    auto r = slice_update(a, upd, array({-1}, int32), {0});
+    CHECK_THROWS_AS(eval(r), std::runtime_error);
+  }
+  {
+    // A strided (non-contiguous) start tensor must be read through its
+    // strides, not linearly.
+    auto big = array({20, 0}, int32);
+    auto strided_start = slice(big, {0}, {2}, {2}); // shape (1,), strides (2,)
+    auto r = slice_update(a, upd, strided_start, {0});
+    CHECK_THROWS_AS(eval(r), std::runtime_error);
+  }
+}

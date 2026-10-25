@@ -342,6 +342,59 @@ void DynamicSlice::eval_cpu(const std::vector<array>& inputs, array& out) {
   }
 }
 
+namespace {
+
+// Walk `start` with its own strides so a non-contiguous (strided view) start
+// tensor is read correctly.
+template <typename IdxT>
+void check_slice_start(const array& start, int i, size_t size) {
+  auto loc = elem_to_loc(i, start.shape(), start.strides());
+  auto idx = static_cast<int64_t>(start.data<IdxT>()[loc]);
+  if (idx < 0 || idx >= static_cast<int64_t>(size)) {
+    throw std::runtime_error("[slice_update] Start index out of bounds.");
+  }
+}
+
+void check_dynamic_slice_start(
+    const array& start,
+    const Shape& shape,
+    const std::vector<int>& axes) {
+  for (int i = 0; i < axes.size(); ++i) {
+    auto size = static_cast<size_t>(shape[axes[i]]);
+    switch (start.dtype()) {
+      case int8:
+        check_slice_start<int8_t>(start, i, size);
+        break;
+      case int16:
+        check_slice_start<int16_t>(start, i, size);
+        break;
+      case int32:
+        check_slice_start<int32_t>(start, i, size);
+        break;
+      case int64:
+        check_slice_start<int64_t>(start, i, size);
+        break;
+      case uint8:
+        check_slice_start<uint8_t>(start, i, size);
+        break;
+      case uint16:
+        check_slice_start<uint16_t>(start, i, size);
+        break;
+      case uint32:
+        check_slice_start<uint32_t>(start, i, size);
+        break;
+      case uint64:
+        check_slice_start<uint64_t>(start, i, size);
+        break;
+      default:
+        throw std::invalid_argument(
+            "[slice_update] Invalid start index type.");
+    }
+  }
+}
+
+} // namespace
+
 void DynamicSliceUpdate::eval_cpu(
     const std::vector<array>& inputs,
     array& out) {
@@ -352,6 +405,9 @@ void DynamicSliceUpdate::eval_cpu(
 
   auto& in = inputs[0];
   auto& upd = inputs[1];
+
+  // Check the start indices are within bounds before writing out of bounds.
+  check_dynamic_slice_start(inputs[2], out.shape(), axes_);
 
   // Copy or move src to dst
   auto ctype = in.flags().contiguous && in.size() == in.data_size()
