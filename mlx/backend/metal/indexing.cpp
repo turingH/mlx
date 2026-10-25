@@ -19,6 +19,74 @@
 
 namespace mlx::core {
 
+
+namespace {
+
+// Check that every index value is within [-size, size) for its axis. The Metal
+// buffers are in shared memory on Apple Silicon, so the index values are read
+// directly on the host before the kernel is dispatched.
+template <typename IdxT>
+void check_index(const array& indices, size_t size, const char* op) {
+  const auto* ptr = indices.data<IdxT>();
+  for (size_t i = 0; i < indices.size(); ++i) {
+    // Walk with the index array's own strides: a non-contiguous (strided
+    // view) index tensor must not be read linearly.
+    auto loc = elem_to_loc(i, indices.shape(), indices.strides());
+    auto idx = static_cast<int64_t>(ptr[loc]);
+    if (idx < -static_cast<int64_t>(size) ||
+        idx >= static_cast<int64_t>(size)) {
+      std::ostringstream msg;
+      msg << "[" << op << "] Index " << idx << " out of bounds for size "
+          << size << ".";
+      throw std::runtime_error(msg.str());
+    }
+  }
+}
+
+// `inputs[1 + j]` is the j-th index array.
+void check_indices_in_bounds(
+    const std::vector<array>& inputs,
+    int nidx,
+    const std::vector<int>& axes,
+    const Shape& shape,
+    const char* op) {
+  for (int j = 0; j < nidx; ++j) {
+    const auto& indices = inputs[1 + j];
+    auto size = static_cast<size_t>(shape[axes[j]]);
+    switch (indices.dtype()) {
+      case int8:
+        check_index<int8_t>(indices, size, op);
+        break;
+      case int16:
+        check_index<int16_t>(indices, size, op);
+        break;
+      case int32:
+        check_index<int32_t>(indices, size, op);
+        break;
+      case int64:
+        check_index<int64_t>(indices, size, op);
+        break;
+      case uint8:
+        check_index<uint8_t>(indices, size, op);
+        break;
+      case uint16:
+        check_index<uint16_t>(indices, size, op);
+        break;
+      case uint32:
+        check_index<uint32_t>(indices, size, op);
+        break;
+      case uint64:
+        check_index<uint64_t>(indices, size, op);
+        break;
+      default:
+        throw std::invalid_argument(
+            std::string("[") + op + "] Invalid index type.");
+    }
+  }
+}
+
+} // namespace
+
 constexpr int METAL_MAX_INDEX_ARRAYS = 20;
 
 std::pair<std::string, std::string> make_index_args(
@@ -70,6 +138,8 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
         << METAL_MAX_INDEX_ARRAYS << " index arrays not yet supported.";
     throw std::runtime_error(msg.str());
   }
+
+  check_indices_in_bounds(inputs, nidx, axes_, src.shape(), "gather");
 
   out.set_data(allocator::malloc(out.nbytes()));
   if (out.size() == 0) {
@@ -251,6 +321,8 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
     throw std::runtime_error(msg.str());
   }
 
+  check_indices_in_bounds(inputs, nidx, axes_, out.shape(), "scatter");
+
   // Copy src into out
   CopyType copy_type;
   if (inputs[0].data_size() == 1) {
@@ -428,6 +500,9 @@ void GatherAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& src = inputs[0];
   auto& idx = inputs[1];
 
+  check_indices_in_bounds(
+      inputs, 1, std::vector<int>{axis_}, src.shape(), "gather_axis");
+
   out.set_data(allocator::malloc(out.nbytes()));
   if (out.size() == 0) {
     return;
@@ -516,6 +591,9 @@ void ScatterAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& src = inputs[0];
   auto& idx = inputs[1];
   auto& upd = inputs[2];
+
+  check_indices_in_bounds(
+      inputs, 1, std::vector<int>{axis_}, out.shape(), "scatter_axis");
 
   // Copy src into out
   CopyType copy_type;
