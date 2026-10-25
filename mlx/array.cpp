@@ -1,5 +1,6 @@
 // Copyright © 2023-2024 Apple Inc.
 #include <functional>
+#include <limits>
 #include <unordered_map>
 
 #include "mlx/array.h"
@@ -243,8 +244,22 @@ void array::ArrayDesc::init() {
   strides.resize(shape.size());
   size = 1;
   for (int i = shape.size() - 1; i >= 0; --i) {
+    // Strides are int64, so a stride that does not fit in int64 is invalid.
+    if (size > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      throw std::runtime_error("[array] Shape is too large.");
+    }
     strides[i] = size;
+    if (shape[i] < 0) {
+      throw std::runtime_error("[array] Negative dimension in shape.");
+    }
+    if (shape[i] != 0 &&
+        size > std::numeric_limits<size_t>::max() / shape[i]) {
+      throw std::runtime_error("[array] Shape is too large.");
+    }
     size *= shape[i];
+  }
+  if (size > std::numeric_limits<size_t>::max() / size_of(dtype)) {
+    throw std::runtime_error("[array] Shape is too large.");
   }
   for (const auto& in : inputs) {
     is_tracer |= in.is_tracer();

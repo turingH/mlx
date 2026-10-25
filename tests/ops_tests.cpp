@@ -4848,3 +4848,14 @@ TEST_CASE("roll and tile shape overflow") {
   auto rolled = roll(x, -2147483647 - 1);
   CHECK(array_equal(rolled, x).item<bool>());
 }
+
+TEST_CASE("test array shape overflow") {
+  // Element count overflow: the dimension product wraps past 2^64.
+  CHECK_THROWS_AS(
+      zeros({2147483647, 2147483647, 2147483647}, float32),
+      std::runtime_error);
+  // Byte count overflow: element count fits size_t, but size * itemsize wraps.
+  CHECK_THROWS_AS(zeros({2147483647, 2147483647}, int64), std::runtime_error);
+  // Stride overflow: size and nbytes fit, but an int64 stride wraps.
+  CHECK_THROWS_AS(zeros({1, 2147483647, 2147483647, 3}, int8), std::runtime_error);
+}
