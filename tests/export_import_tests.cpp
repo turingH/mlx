@@ -1,6 +1,8 @@
 // Copyright © 2024 Apple Inc.
 
 #include <filesystem>
+#include <fstream>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -188,4 +190,102 @@ TEST_CASE("test export import with metadata") {
     fn_exporter({array({0, 1, 2})});
   }
   CHECK(import_function(file_path).metadata() == metadata);
+}
+
+TEST_CASE("test import rejects patched slice state") {
+  std::string path = get_temp_file("evil_slice.mlxfn");
+  auto fun = [](const std::vector<array>& x) -> std::vector<array> {
+    return {slice(x[0], {2}, {4}, {1})};
+  };
+  std::vector<float> data{0, 1, 2, 3, 4, 5, 6, 7};
+  export_function(path, fun, {array(data.data(), {8}, float32)});
+
+  // The benign file imports and runs.
+  {
+    auto f = import_function(path);
+    auto out = f(std::vector<array>{array(data.data(), {8}, float32)});
+    CHECK_EQ(out[0].shape(), Shape{2});
+  }
+
+  // Locate the serialized Slice state (starts={2}, ends={4}, strides={1})
+  // and patch start to a huge out-of-bounds value.
+  std::ifstream f(path, std::ios::binary);
+  std::vector<char> buf((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+  std::vector<char> pat;
+  auto push_u64 = [&](uint64_t v) {
+    for (int i = 0; i < 8; i++) pat.push_back((v >> (8 * i)) & 0xff);
+  };
+  auto push_i32 = [&](int32_t v) {
+    for (int i = 0; i < 4; i++) pat.push_back((v >> (8 * i)) & 0xff);
+  };
+  push_u64(1);
+  push_i32(2);
+  push_u64(1);
+  push_i32(4);
+  push_u64(1);
+  push_i32(1);
+  int found = -1;
+  for (size_t i = 0; i + pat.size() <= buf.size(); ++i) {
+    if (std::equal(pat.begin(), pat.end(), buf.begin() + i)) {
+      found = (int)i;
+      break;
+    }
+  }
+  REQUIRE(found >= 0);
+  int32_t evil = 0x40000000;
+  std::memcpy(buf.data() + found + 8, &evil, 4);
+  std::string evil_path = get_temp_file("evil_slice_patched.mlxfn");
+  {
+    std::ofstream out(evil_path, std::ios::binary);
+    out.write(buf.data(), buf.size());
+  }
+
+  // The patched file must be rejected instead of producing an array whose
+  // values read out of bounds.
+  CHECK_THROWS_AS(import_function(evil_path), std::runtime_error);
+}
+
+TEST_CASE("test import rejects patched output shape") {
+  // A deflated Concat output shape makes the concat kernel write 8 floats
+  // into a 2-float buffer (heap overflow, ASAN-proven). The file's shapes
+  // must instead be rejected at import.
+  std::string path = get_temp_file("evil_cat.mlxfn");
+  auto fun = [](const std::vector<array>& x) -> std::vector<array> {
+    return {concatenate({x[0], x[1]}, 0)};
+  };
+  std::vector<float> d1(8, 1.0f), d2(8, 2.0f);
+  export_function(path, fun,
+                  {array(d1.data(), {8}, float32), array(d2.data(), {8}, float32)});
+
+  std::ifstream f(path, std::ios::binary);
+  std::vector<char> buf((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+  // The tape output record is the only shape {16} in the file.
+  std::vector<char> pat;
+  auto push_u64 = [&](uint64_t v) {
+    for (int i = 0; i < 8; i++) pat.push_back((v >> (8 * i)) & 0xff);
+  };
+  auto push_i32 = [&](int32_t v) {
+    for (int i = 0; i < 4; i++) pat.push_back((v >> (8 * i)) & 0xff);
+  };
+  push_u64(1);
+  push_i32(16);
+  int found = -1, count = 0;
+  for (size_t i = 0; i + 12 <= buf.size(); ++i) {
+    if (std::equal(pat.begin(), pat.end(), buf.begin() + i)) {
+      found = (int)i;
+      count++;
+    }
+  }
+  REQUIRE(found >= 0);
+  REQUIRE_EQ(count, 1);
+  int32_t evil = 2;
+  std::memcpy(buf.data() + found + 8, &evil, 4);
+  std::string evil_path = get_temp_file("evil_cat_patched.mlxfn");
+  {
+    std::ofstream out(evil_path, std::ios::binary);
+    out.write(buf.data(), buf.size());
+  }
+  CHECK_THROWS_AS(import_function(evil_path), std::runtime_error);
 }

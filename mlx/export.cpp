@@ -28,6 +28,116 @@ bool is_big_endian() {
 
 namespace mlx::core {
 
+namespace {
+
+// The shapes recorded in the file must match what the primitive actually
+// produces for its inputs; a mismatch means the eval kernels write or read
+// with a different extent than the allocated buffer.
+void check_output_shapes(
+    Primitive& prim,
+    const std::vector<array>& inputs,
+    const std::vector<Shape>& shapes) {
+  std::vector<Shape> expected;
+  try {
+    expected = prim.output_shapes(inputs);
+  } catch (const std::exception&) {
+    // The primitive cannot infer its output shapes from its inputs; the
+    // state validation below is the guard for those.
+    return;
+  }
+  if (expected.size() != shapes.size()) {
+    throw std::runtime_error(
+        "[import_function] Output count in file does not match the primitive.");
+  }
+  for (int i = 0; i < shapes.size(); ++i) {
+    if (expected[i] != shapes[i]) {
+      throw std::runtime_error(
+          "[import_function] Output shape in file does not match the "
+          "primitive. The file may be corrupt or crafted.");
+    }
+  }
+}
+
+// Validate that a deserialized primitive's state is consistent with its
+// inputs. The ops.cpp facades enforce these invariants when graphs are
+// built normally, but import_function constructs primitives directly from
+// the file, so a crafted .mlxfn can otherwise carry offsets and axes that
+// the eval kernels use as raw memory offsets.
+void validate_imported_array(const array& arr) {
+  if (!arr.has_primitive() || arr.inputs().empty()) {
+    return;
+  }
+  auto* p = &arr.primitive();
+  const auto& in = arr.inputs()[0];
+  auto bad = [](const char* what) {
+    throw std::runtime_error(
+        std::string("[import_function] Invalid state in file: ") + what +
+        ". The file may be corrupt or crafted.");
+  };
+  if (auto* sl = dynamic_cast<const Slice*>(p)) {
+    auto [starts, ends, strides] = sl->state();
+    if (starts.size() != in.ndim() || ends.size() != in.ndim() ||
+        strides.size() != in.ndim() || arr.ndim() != in.ndim()) {
+      bad("slice indices do not match input dimensions");
+    }
+    for (int i = 0; i < in.ndim(); ++i) {
+      auto d = in.shape(i);
+      if (starts[i] < 0 || starts[i] > d || ends[i] < 0 || ends[i] > d) {
+        bad("slice start/end out of bounds");
+      }
+      // The recorded output shape must match the slice parameters.
+      auto span = strides[i] > 0 ? ends[i] - starts[i] : starts[i] - ends[i];
+      auto step = strides[i] > 0 ? strides[i] : -strides[i];
+      auto out_d = span > 0 ? (span + step - 1) / step : 0;
+      if (arr.shape(i) != out_d) {
+        bad("slice output shape does not match the slice parameters");
+      }
+      if (arr.shape(i) > 0 && strides[i] == 0) {
+        bad("slice stride is zero");
+      }
+    }
+  } else if (auto* su = dynamic_cast<const SliceUpdate*>(p)) {
+    auto [reduce, starts, ends, strides] = su->state();
+    if (starts.size() != in.ndim() || ends.size() != in.ndim() ||
+        strides.size() != in.ndim()) {
+      bad("slice_update indices do not match input dimensions");
+    }
+    for (int i = 0; i < in.ndim(); ++i) {
+      auto d = in.shape(i);
+      if (starts[i] < 0 || starts[i] > d || ends[i] < 0 || ends[i] > d) {
+        bad("slice_update start/end out of bounds");
+      }
+    }
+  } else if (auto* as = dynamic_cast<const AsStrided*>(p)) {
+    auto [shape, strides, offset] = as->state();
+    size_t span = 1;
+    for (int i = 0; i < shape.size(); ++i) {
+      if (shape[i] < 0) {
+        bad("as_strided shape is negative");
+      }
+      span += (shape[i] > 0) ? (shape[i] - 1) * std::abs(strides[i]) : 0;
+    }
+    if (offset > in.data_size() || span > in.data_size() - offset) {
+      bad("as_strided offset/strides exceed the input buffer");
+    }
+  } else if (auto* dsu = dynamic_cast<const DynamicSliceUpdate*>(p)) {
+    for (auto ax : dsu->state()) {
+      auto a = ax < 0 ? ax + in.ndim() : ax;
+      if (a < 0 || a >= in.ndim()) {
+        bad("dynamic slice axis out of bounds");
+      }
+    }
+  } else if (auto* ga = dynamic_cast<const GatherAxis*>(p)) {
+    auto a = ga->state() < 0 ? ga->state() + in.ndim() : ga->state();
+    if (a < 0 || a >= in.ndim()) {
+      bad("gather axis out of bounds");
+    }
+  }
+}
+
+} // namespace
+
+
 using namespace mlx::core::fast;
 
 using Reader = io::ParallelFileReader;
@@ -765,7 +875,8 @@ void FunctionExporter::export_with_callback(
     }
     callback({{"type", "constants"}, {"constants", new_constants}});
   }
-  auto factory = PrimitiveFactory();
+  
+auto factory = PrimitiveFactory();
 
   // Callback for each primitive in the tape
   for (auto& arr : tape) {
@@ -1121,6 +1232,7 @@ ImportedFunction::ImportedFunction(const std::string& file)
         if (num_siblings == 0) {
           auto shape = deserialize<Shape>(is);
           auto type = deserialize<Dtype>(is);
+          check_output_shapes(*prim, inputs, {shape});
           tape.emplace_back(
               std::move(shape), type, std::move(prim), std::move(inputs));
           array_map.emplace(id, tape.back());
@@ -1128,6 +1240,7 @@ ImportedFunction::ImportedFunction(const std::string& file)
           auto ids = deserialize<std::vector<uint64_t>>(is);
           auto shapes = deserialize<std::vector<Shape>>(is);
           auto types = deserialize<std::vector<Dtype>>(is);
+          check_output_shapes(*prim, inputs, shapes);
           auto arrays = array::make_arrays(
               std::move(shapes),
               std::move(types),
@@ -1165,6 +1278,10 @@ ImportedFunction::ImportedFunction(const std::string& file)
           tape.push_back(array_map.at(id));
         }
       }
+    }
+
+    for (const auto& a : tape) {
+      validate_imported_array(a);
     }
 
     std::vector<array> trace_outputs;
