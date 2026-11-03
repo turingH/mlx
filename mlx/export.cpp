@@ -1128,6 +1128,60 @@ ImportedFunction::ImportedFunction(const std::string& file)
         if (num_siblings == 0) {
           auto shape = deserialize<Shape>(is);
           auto type = deserialize<Dtype>(is);
+          // The recorded output shape must match what the primitive produces
+          // for its deserialized inputs. Slice and SliceUpdate cannot infer
+          // theirs, so check the indices their state touches instead: eval
+          // turns the starts and strides into offsets against the input
+          // buffer and never uses the end indices.
+          try {
+            auto expected = prim->output_shapes(inputs);
+            if (expected.size() != 1 || expected[0] != shape) {
+              throw std::runtime_error(
+                  "[import_function] Recorded output shape does not match the primitive.");
+            }
+          } catch (const std::invalid_argument&) {
+            // The primitive cannot infer its output shapes from its inputs.
+          }
+          const array* in = nullptr;
+          Shape starts, strides, counts;
+          if (auto* sl = dynamic_cast<const Slice*>(prim.get())) {
+            if (inputs.size() != 1) {
+              throw std::runtime_error("[import_function] Invalid slice.");
+            }
+            std::tie(starts, std::ignore, strides) = sl->state();
+            in = &inputs[0];
+            counts = shape;
+          } else if (auto* su = dynamic_cast<const SliceUpdate*>(prim.get())) {
+            if (inputs.size() != 2) {
+              throw std::runtime_error(
+                  "[import_function] Invalid slice_update.");
+            }
+            std::tie(std::ignore, starts, std::ignore, strides) = su->state();
+            in = &inputs[0];
+            counts = inputs[1].shape();
+          }
+          if (in != nullptr) {
+            if (starts.size() != in->ndim() || strides.size() != in->ndim() ||
+                counts.size() != in->ndim()) {
+              throw std::runtime_error(
+                  "[import_function] Invalid slice state.");
+            }
+            for (int i = 0; i < in->ndim(); ++i) {
+              if (counts[i] <= 0) {
+                continue;
+              }
+              int64_t first = starts[i];
+              int64_t last =
+                  first + (counts[i] - 1) * static_cast<int64_t>(strides[i]);
+              if (first > last) {
+                std::swap(first, last);
+              }
+              if (first < 0 || last >= in->shape(i)) {
+                throw std::runtime_error(
+                    "[import_function] Slice indices are out of bounds.");
+              }
+            }
+          }
           tape.emplace_back(
               std::move(shape), type, std::move(prim), std::move(inputs));
           array_map.emplace(id, tape.back());
@@ -1135,6 +1189,23 @@ ImportedFunction::ImportedFunction(const std::string& file)
           auto ids = deserialize<std::vector<uint64_t>>(is);
           auto shapes = deserialize<std::vector<Shape>>(is);
           auto types = deserialize<std::vector<Dtype>>(is);
+          // Slice and SliceUpdate are single-output primitives, so siblings
+          // recorded for them mean the file is corrupt.
+          if (dynamic_cast<const Slice*>(prim.get()) != nullptr ||
+              dynamic_cast<const SliceUpdate*>(prim.get()) != nullptr) {
+            throw std::runtime_error(
+                "[import_function] Slice and SliceUpdate cannot have siblings.");
+          }
+          // The recorded output shapes must match what the primitive
+          // produces for its deserialized inputs.
+          try {
+            if (prim->output_shapes(inputs) != shapes) {
+              throw std::runtime_error(
+                  "[import_function] Recorded output shapes do not match the primitive.");
+            }
+          } catch (const std::invalid_argument&) {
+            // The primitive cannot infer its output shapes from its inputs.
+          }
           auto arrays = array::make_arrays(
               std::move(shapes),
               std::move(types),
