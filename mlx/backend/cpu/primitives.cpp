@@ -159,6 +159,9 @@ void AsType::eval_cpu(const std::vector<array>& inputs, array& out) {
 }
 
 void Concatenate::eval_cpu(const std::vector<array>& inputs, array& out) {
+  if (out.shape() != output_shapes(inputs)[0]) {
+    throw std::runtime_error("[concatenate] Invalid output shape.");
+  }
   std::vector<int> sizes;
   sizes.push_back(0);
   for (auto& p : inputs) {

@@ -8,6 +8,7 @@
 
 #include "mlx/export.h"
 #include "mlx/mlx.h"
+#include "mlx/primitives.h"
 
 using namespace mlx::core;
 
@@ -16,6 +17,29 @@ std::string get_temp_file(const std::string& name) {
   return std::filesystem::temp_directory_path().append(name).string();
 }
 } // namespace
+
+TEST_CASE("test imported concatenate validates output shape") {
+  auto path = get_temp_file("invalid_concatenate.mlxfn");
+  auto inputs = std::vector<array>{arange(8, float32), ones({8})};
+  for (const auto& shape : {Shape{2}, Shape{32}, Shape{4, 4}, Shape{16}}) {
+    auto fun = [shape](const std::vector<array>& args) {
+      return std::vector<array>{array(
+          shape,
+          float32,
+          std::make_shared<Concatenate>(default_stream(default_device()), 0),
+          args)};
+    };
+    export_function(path, fun, inputs);
+    auto output = import_function(path)(inputs)[0];
+    REQUIRE_EQ(output.shape(), shape);
+    if (shape == Shape{16}) {
+      CHECK(array_equal(output, concatenate(inputs)).item<bool>());
+    } else {
+      CHECK_THROWS_AS(eval(output), std::runtime_error);
+    }
+  }
+  std::filesystem::remove(path);
+}
 
 TEST_CASE("test export basic functions") {
   std::string file_path = get_temp_file("model.mlxfn");

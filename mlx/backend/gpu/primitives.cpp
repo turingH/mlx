@@ -54,6 +54,9 @@ void BroadcastAxes::eval_gpu(const std::vector<array>& inputs, array& out) {
 
 void Concatenate::eval_gpu(const std::vector<array>& inputs, array& out) {
   MLX_PROFILER_RANGE("Concatenate::eval_gpu");
+  if (out.shape() != output_shapes(inputs)[0]) {
+    throw std::runtime_error("[concatenate] Invalid output shape.");
+  }
   concatenate_gpu(inputs, out, axis_, stream());
 }
 
